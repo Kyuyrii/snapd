@@ -25,6 +25,7 @@ import (
 
 	. "gopkg.in/check.v1"
 
+	"github.com/snapcore/snapd/arch"
 	"github.com/snapcore/snapd/snap/naming"
 	"github.com/snapcore/snapd/testutil"
 )
@@ -564,7 +565,46 @@ func (s *ValidateSuite) TestValidateAssumes(c *C) {
 	}
 
 	for _, test := range assumesTests {
-		err := naming.ValidateAssumes(test.assumes, test.version, test.features)
+		err := naming.ValidateAssumes(test.assumes, test.version, test.features, "")
+		if test.err == "" {
+			c.Check(err, IsNil)
+		} else {
+			c.Check(err, ErrorMatches, test.err)
+		}
+	}
+}
+
+func (s *ValidateSuite) TestValidateAssumesISAArch(c *C) {
+	var assumesTests = []struct {
+		assumes []string
+		arch    string
+		err     string
+	}{
+		// We do not test the explicit "success" and failure cases as those are done in architecture-specific
+		// files
+		{
+			// Different architecture ignored with no error
+			assumes: []string{"isa-riscv64-rva23"},
+			arch:    "amd64",
+		}, {
+			// There are no specified ISA constraints for amd64
+			assumes: []string{"isa-amd64-sampleisa"},
+			arch:    "amd64",
+			err:     "isa-amd64-sampleisa: ISA specification is not supported for arch: amd64",
+		}, {
+			// ISA string is malformed
+			assumes: []string{"isa-riscv64..rva23"},
+			arch:    "riscv64",
+			err:     "isa-riscv64..rva23: must be in the format isa-<arch>-<isa_val>",
+		},
+	}
+
+	for _, test := range assumesTests {
+		current := arch.DpkgArchitecture()
+		defer func() { arch.SetArchitecture(arch.ArchitectureType(current)) }()
+		arch.SetArchitecture(arch.ArchitectureType(test.arch))
+		err := naming.ValidateAssumes(test.assumes, "", nil, test.arch)
+
 		if test.err == "" {
 			c.Check(err, IsNil)
 		} else {

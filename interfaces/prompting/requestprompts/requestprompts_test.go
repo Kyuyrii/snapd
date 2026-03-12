@@ -1825,29 +1825,29 @@ func (s *requestpromptsSuite) TestCloseThenOperate(c *C) {
 
 	metadata := prompting.Metadata{Interface: "home"}
 	result, merged, err := pdb.AddOrMerge(&metadata, "", nil, nil, nil)
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 	c.Check(result, IsNil)
 	c.Check(merged, Equals, false)
 
 	clientActivity := false // doesn't matter if it's true or false for this test
 	prompts, err := pdb.Prompts(1000, clientActivity)
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 	c.Check(prompts, IsNil)
 
 	prompt, err := pdb.PromptWithID(1000, 1, clientActivity)
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 	c.Check(prompt, IsNil)
 
 	result, err = pdb.Reply(1000, 1, prompting.OutcomeDeny, clientActivity)
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 	c.Check(result, IsNil)
 
 	promptIDs, err := pdb.HandleNewRule(nil, nil)
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 	c.Check(promptIDs, IsNil)
 
 	err = pdb.Close()
-	c.Check(err, Equals, prompting_errors.ErrPromptsClosed)
+	c.Check(err, Equals, prompting_errors.ErrPromptingClosed)
 }
 
 func (s *requestpromptsSuite) TestRequestMappingAcrossRestarts(c *C) {
@@ -2219,6 +2219,19 @@ func (s *requestpromptsSuite) TestPromptMarshalJSON(c *C) {
 			requestedPerms:   []string{"access"},
 			outstandingPerms: []string{"access"},
 			expected:         `{"id":"0000000000000002","timestamp":"2024-08-14T09:47:03.350324989-05:00","snap":"thunderbird","pid":112358,"cgroup":"0::/user.slice/user-1000.slice/user@1000.service/app.slice/some-cgroup.scope","interface":"camera","constraints":{"requested-permissions":["access"],"available-permissions":["access"]}}`,
+		},
+		{
+			metadata: &prompting.Metadata{
+				User:      s.defaultUser,
+				Snap:      "protonmail-bridge",
+				PID:       1248,
+				Cgroup:    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/some-cgroup.scope",
+				Interface: "audio-record",
+			},
+			path:             "/placeholder",
+			requestedPerms:   []string{"access"},
+			outstandingPerms: []string{"access"},
+			expected:         `{"id":"0000000000000003","timestamp":"2024-08-14T09:47:03.350324989-05:00","snap":"protonmail-bridge","pid":1248,"cgroup":"0::/user.slice/user-1000.slice/user@1000.service/app.slice/some-cgroup.scope","interface":"audio-record","constraints":{"requested-permissions":["access"],"available-permissions":["access"]}}`,
 		},
 	} {
 		fakeRequest := &prompting.Request{Key: fmt.Sprintf("fake:%d", reqCount)}

@@ -75,8 +75,8 @@ func parseInterfaceSpecificConstraints(iface string, constraintsJSON Constraints
 	switch iface {
 	case "home":
 		interfaceSpecific = &InterfaceSpecificConstraintsHome{}
-	case "camera":
-		interfaceSpecific = &InterfaceSpecificConstraintsCamera{}
+	case "camera", "audio-record":
+		interfaceSpecific = &InterfaceSpecificConstraintsEmpty{}
 	default:
 		return nil, prompting_errors.NewInvalidInterfaceError(iface, availableInterfaces())
 	}
@@ -155,32 +155,33 @@ func (constraints *InterfaceSpecificConstraintsHome) patch(existing InterfaceSpe
 	return newConstraints
 }
 
-// InterfaceSpecificConstraintsCamera don't have any fields. All camera prompts,
-// replies, and rules concern access to all cameras.
-type InterfaceSpecificConstraintsCamera struct{}
+// InterfaceSpecificConstraintsEmpty don't have any fields. This should be used
+// for all interfaces which do not have interface-specific constraints, such as
+// marker interfaces.
+type InterfaceSpecificConstraintsEmpty struct{}
 
-func (constraints *InterfaceSpecificConstraintsCamera) parseJSON(constraintsJSON ConstraintsJSON) error {
+func (constraints *InterfaceSpecificConstraintsEmpty) parseJSON(constraintsJSON ConstraintsJSON) error {
 	// Don't expect any fields
 	return nil
 }
 
-func (constraints *InterfaceSpecificConstraintsCamera) parsePatchJSON(constraintsJSON ConstraintsJSON) error {
+func (constraints *InterfaceSpecificConstraintsEmpty) parsePatchJSON(constraintsJSON ConstraintsJSON) error {
 	// Don't expect any fields
 	return nil
 }
 
-func (constraints *InterfaceSpecificConstraintsCamera) toJSON() (ConstraintsJSON, error) {
+func (constraints *InterfaceSpecificConstraintsEmpty) toJSON() (ConstraintsJSON, error) {
 	return make(ConstraintsJSON), nil
 }
 
-func (constraints *InterfaceSpecificConstraintsCamera) pathPattern() *patterns.PathPattern {
+func (constraints *InterfaceSpecificConstraintsEmpty) pathPattern() *patterns.PathPattern {
 	pathPattern, _ := patterns.ParsePathPattern("/**")
 	// Error cannot occur, this is a known good pattern.
 	return pathPattern
 }
 
-func (constraints *InterfaceSpecificConstraintsCamera) patch(existing InterfaceSpecificConstraints) InterfaceSpecificConstraints {
-	return &InterfaceSpecificConstraintsCamera{}
+func (constraints *InterfaceSpecificConstraintsEmpty) patch(existing InterfaceSpecificConstraints) InterfaceSpecificConstraints {
+	return &InterfaceSpecificConstraintsEmpty{}
 }
 
 // Constraints hold information about the applicability of a new rule to
@@ -920,9 +921,9 @@ func AvailablePermissions(iface string) ([]string, error) {
 	return available, nil
 }
 
-// AbstractPermissionsFromAppArmorPermissions returns the list of permissions
+// abstractPermissionsFromAppArmorPermissions returns the list of permissions
 // corresponding to the given AppArmor permissions for the given interface.
-func AbstractPermissionsFromAppArmorPermissions(iface string, permissions notify.AppArmorPermission) ([]string, error) {
+func abstractPermissionsFromAppArmorPermissions(iface string, permissions notify.AppArmorPermission) ([]string, error) {
 	filePerms, ok := permissions.(notify.FilePermission)
 	if !ok {
 		return nil, fmt.Errorf("cannot parse the given permissions as file permissions: %v", permissions)
@@ -965,9 +966,9 @@ func AbstractPermissionsFromAppArmorPermissions(iface string, permissions notify
 	return abstractPerms, nil
 }
 
-// AbstractPermissionsToAppArmorPermissions returns AppArmor permissions
+// abstractPermissionsToAppArmorPermissions returns AppArmor permissions
 // corresponding to the given permissions for the given interface.
-func AbstractPermissionsToAppArmorPermissions(iface string, permissions []string) (notify.AppArmorPermission, error) {
+func abstractPermissionsToAppArmorPermissions(iface string, permissions []string) (notify.AppArmorPermission, error) {
 	// permissions may be empty, e.g. if we're constructing allowed permissions
 	// and denying all of them.
 	filePermsMap, exists := interfaceFilePermissionsMaps[iface]

@@ -30,8 +30,20 @@ import (
 
 	"github.com/snapcore/snapd/dirs"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/strutil"
 )
+
+const (
+	CertificateStateUnset    = "unset"
+	CertificateStateAccepted = "accepted"
+	CertificateStateBlocked  = "blocked"
+)
+
+type CertificateData struct {
+	Raw    *x509.Certificate
+	Digest string
+}
 
 type certificate struct {
 	Name     string
@@ -40,11 +52,20 @@ type certificate struct {
 	Digest   string
 }
 
-// parseCertificateChainData parses certificate data and returns the first certificate,
+func digestHexForChain(chainDER [][]byte) string {
+	h := sha256.New224()
+	for _, der := range chainDER {
+		// Hash the DER bytes as-is (in file order).
+		_, _ = h.Write(der)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// ParseCertificateData parses certificate data and returns the first certificate,
 // plus the full chain DER blobs (all CERTIFICATE PEM blocks, in order).
 //
 // For DER input, it returns a single-certificate chain.
-func parseCertificateChainData(certData []byte) (*x509.Certificate, [][]byte, error) {
+func ParseCertificateData(certData []byte) (*CertificateData, error) {
 	// Many distro-provided *.crt files are PEM-encoded, while x509.ParseCertificate
 	// expects DER.
 	if block, _ := pem.Decode(certData); block != nil {
@@ -63,7 +84,7 @@ func parseCertificateChainData(certData []byte) (*x509.Certificate, [][]byte, er
 
 			cert, err := x509.ParseCertificate(block.Bytes)
 			if err != nil {
-				return nil, nil, err
+				return nil, fmt.Errorf("failed to parse certificate PEM block: %v", err)
 			}
 			if first == nil {
 				first = cert
@@ -71,35 +92,24 @@ func parseCertificateChainData(certData []byte) (*x509.Certificate, [][]byte, er
 			chainDER = append(chainDER, cert.Raw)
 		}
 		if first == nil {
-			return nil, nil, fmt.Errorf("no certificate PEM block found")
+			return nil, fmt.Errorf("no certificate PEM block found")
 		}
-		return first, chainDER, nil
+		return &CertificateData{
+			Raw:    first,
+			Digest: digestHexForChain(chainDER),
+		}, nil
 	}
 
 	// The file is not PEM-encoded, so we try to parse it as DER.
 	// We return a single-certificate chain in this case.
 	cert, err := x509.ParseCertificate(certData)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("failed to parse DER certificate: %v", err)
 	}
-	return cert, [][]byte{cert.Raw}, nil
-}
-
-// parseCertificateData returns the first certificate found.
-//
-// Note: a .crt file may contain a certificate chain (multiple certificates in sequence).
-func parseCertificateData(certData []byte) (*x509.Certificate, error) {
-	cert, _, err := parseCertificateChainData(certData)
-	return cert, err
-}
-
-func chainDigestHex(chainDER [][]byte) string {
-	h := sha256.New224()
-	for _, der := range chainDER {
-		// Hash the DER bytes as-is (in file order).
-		_, _ = h.Write(der)
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	return &CertificateData{
+		Raw:    cert,
+		Digest: digestHexForChain([][]byte{cert.Raw}),
+	}, nil
 }
 
 func trimCrtExtension(name string) string {
@@ -156,13 +166,13 @@ func parseCertificates(certsPath string) ([]certificate, error) {
 		}
 
 		// Load the crt file and calculate the digest of the certificate.
-		certData, err := os.ReadFile(certRealPath)
+		certBytes, err := os.ReadFile(certRealPath)
 		if err != nil {
 			logger.Noticef("Failed to read certificate %q: %v", certRealPath, err)
 			continue
 		}
 
-		_, chainDER, err := parseCertificateChainData(certData)
+		cert, err := ParseCertificateData(certBytes)
 		if err != nil {
 			logger.Noticef("Failed to parse certificate %q: %v", certRealPath, err)
 			continue
@@ -173,7 +183,7 @@ func parseCertificates(certsPath string) ([]certificate, error) {
 			Name:     trimCrtExtension(caFile.Name()),
 			Path:     filepath.Join(certsPath, caFile.Name()),
 			RealPath: certRealPath,
-			Digest:   chainDigestHex(chainDER),
+			Digest:   cert.Digest,
 		}
 		certsObjects = append(certsObjects, certObject)
 	}
@@ -208,7 +218,7 @@ func readDigests(dir string) ([]string, error) {
 // generateCACertificates generates the ca-certificates.crt to the output path
 // The ca-certificates.crt is a concatenation of all the certs in the
 // output path.
-func generateCACertificates(certs, extras []certificate, blocked []string, outputPath string) error {
+func generateCACertificates(certs *certificates, outputPath string) error {
 	certsPath := filepath.Join(outputPath, "ca-certificates.crt")
 	certsFile, err := os.Create(certsPath)
 	if err != nil {
@@ -231,8 +241,8 @@ func generateCACertificates(certs, extras []certificate, blocked []string, outpu
 	// avoid adding digests twice
 	digests := make(map[string]bool)
 
-	for _, cert := range certs {
-		if digests[cert.Digest] || isBlocked(cert, blocked) {
+	for _, cert := range certs.SystemCertificates {
+		if digests[cert.Digest] || isBlocked(cert, certs.BlockedDigests) {
 			continue
 		}
 		if err := copyOne(cert.RealPath); err != nil {
@@ -241,14 +251,81 @@ func generateCACertificates(certs, extras []certificate, blocked []string, outpu
 		digests[cert.Digest] = true
 	}
 
-	for _, cert := range extras {
-		if digests[cert.Digest] || isBlocked(cert, blocked) {
+	for _, cert := range certs.AddedCertificates {
+		if digests[cert.Digest] || isBlocked(cert, certs.BlockedDigests) {
 			continue
 		}
 		if err := copyOne(cert.RealPath); err != nil {
 			return fmt.Errorf("cannot copy extra certificate %q: %v", cert.Name, err)
 		}
 		digests[cert.Digest] = true
+	}
+	return nil
+}
+
+type certificates struct {
+	SystemCertificates []certificate
+	AddedCertificates  []certificate
+	BlockedDigests     []string
+}
+
+// loadCertificates retrieves the system certificates, user added certificates
+// and blocked certificate digests, and returns as a convenient structure.
+func loadCertificates() (*certificates, error) {
+	certs := &certificates{}
+
+	// We will be using the certificates from the rootfs as a starting point,
+	// meaning we need to go into /etc/ssl/certs/ and read
+	// all the certificates from there.
+	systemCerts, err := parseCertificates(dirs.SystemCertsDir)
+	if err != nil {
+		return nil, err
+	}
+	certs.SystemCertificates = systemCerts
+
+	// If the added directory exists, parse it
+	if exists, isDir, err := osutil.DirExists(filepath.Join(dirs.SnapdPKIV1Dir, "added")); err == nil && exists && isDir {
+		addedDir := filepath.Join(dirs.SnapdPKIV1Dir, "added")
+		a, err := parseCertificates(addedDir)
+		if err != nil {
+			return nil, err
+		}
+
+		certs.AddedCertificates = a
+	}
+
+	// If the blocked directory exists, read the digests
+	if exists, isDir, err := osutil.DirExists(filepath.Join(dirs.SnapdPKIV1Dir, "blocked")); err == nil && exists && isDir {
+		blockedDir := filepath.Join(dirs.SnapdPKIV1Dir, "blocked")
+		b, err := readDigests(blockedDir)
+		if err != nil {
+			return nil, err
+		}
+
+		certs.BlockedDigests = b
+	}
+
+	return certs, nil
+}
+
+// ensureDirectories ensures that required directories for the certificate database exist:
+//
+// structure of pki/v1:
+// /var/lib/snapd/pki/v1/added/<digest>.crt (symlink)
+// /var/lib/snapd/pki/v1/blocked/<digest>.crt (symlink)
+// /var/lib/snapd/pki/v1/merged/*.crt (symlinks)
+// /var/lib/snapd/pki/v1/merged/ca-certificates.crt
+// /var/lib/snapd/pki/v1/<name>.crt
+func ensureDirectories() error {
+	dirsToEnsure := []string{
+		filepath.Join(dirs.SnapdPKIV1Dir, "added"),
+		filepath.Join(dirs.SnapdPKIV1Dir, "blocked"),
+		filepath.Join(dirs.SnapdPKIV1Dir, "merged"),
+	}
+	for _, dir := range dirsToEnsure {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("cannot create directory %q: %v", dir, err)
+		}
 	}
 	return nil
 }
@@ -271,12 +348,13 @@ var GenerateCertificateDatabase = GenerateCertificateDatabaseImpl
 // If a previous version of the ca-certificates.crt exists, it is backed up to
 // /var/lib/snapd/pki/v1/merged/ca-certificates.crt.old
 func GenerateCertificateDatabaseImpl() error {
-	mergedDir := filepath.Join(dirs.SnapdPKIV1Dir, "merged")
-	if err := os.MkdirAll(mergedDir, 0o755); err != nil {
-		return fmt.Errorf("cannot create merged certificates directory: %v", err)
+	// we create the added/blocked/merged directories if they don't exist here.
+	if err := ensureDirectories(); err != nil {
+		return err
 	}
 
 	// create a copy of the current certificates in the snapd pki v1 dir
+	mergedDir := filepath.Join(dirs.SnapdPKIV1Dir, "merged")
 	caCertificateDbPath := filepath.Join(mergedDir, "ca-certificates.crt")
 	caCertificateDbBackupPath := caCertificateDbPath + ".old"
 
@@ -294,45 +372,158 @@ func GenerateCertificateDatabaseImpl() error {
 		}
 	}()
 
-	// structure of pki/v1:
-	// /var/lib/snapd/pki/v1/added/<digest>.crt (symlink)
-	// /var/lib/snapd/pki/v1/blocked/<digest>.crt (symlink)
-	// /var/lib/snapd/pki/v1/merged/*.crt (symlinks)
-	// /var/lib/snapd/pki/v1/merged/ca-certificates.crt
-	// /var/lib/snapd/pki/v1/<digest>.crt
-
-	// we create the added/blocked/merged directories if they don't exist here.
-
 	// We will be using the certificates from the rootfs as a starting point,
 	// meaning we need to go into /etc/ssl/certs/ and read
 	// all the certificates from there.
-	baseCertsDir := filepath.Join(dirs.GlobalRootDir, "etc", "ssl", "certs")
-	certs, err := parseCertificates(baseCertsDir)
-	if err != nil {
-		return err
-	}
-
-	addedDir := filepath.Join(dirs.SnapdPKIV1Dir, "added")
-	if err := os.MkdirAll(addedDir, 0o755); err != nil {
-		return fmt.Errorf("cannot create added certificates directory: %v", err)
-	}
-
-	added, err := parseCertificates(addedDir)
-	if err != nil {
-		return err
-	}
-
-	blockedDir := filepath.Join(dirs.SnapdPKIV1Dir, "blocked")
-	if err := os.MkdirAll(blockedDir, 0o755); err != nil {
-		return fmt.Errorf("cannot create blocked certificates directory: %v", err)
-	}
-
-	blocked, err := readDigests(blockedDir)
+	certs, err := loadCertificates()
 	if err != nil {
 		return err
 	}
 
 	// make sure we catch any error here and restore the backup
-	err = generateCACertificates(certs, added, blocked, mergedDir)
+	err = generateCACertificates(certs, mergedDir)
 	return err
+}
+
+func certificatePathWithExtension(dir, name string) string {
+	return filepath.Join(dir, name+".crt")
+}
+
+// CertificatePath returns a path to the certificate file itself,
+// given the name of the certificate (without .crt extension).
+func CertificatePath(name string) string {
+	return certificatePathWithExtension(dirs.SnapdPKIV1Dir, name)
+}
+
+// RemoveCertificateSymlinks removes the symlinks for the given certificate digest
+// from the added and blocked directories.
+func RemoveCertificateSymlinks(digest string) error {
+	addedDir := filepath.Join(dirs.SnapdPKIV1Dir, "added")
+	blockedDir := filepath.Join(dirs.SnapdPKIV1Dir, "blocked")
+
+	if err := os.Remove(certificatePathWithExtension(addedDir, digest)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(certificatePathWithExtension(blockedDir, digest)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// RemoveCertificate removes the certificate file for the given name. This does
+// not remove the symlinks in the added/blocked directories.
+func RemoveCertificate(name string) error {
+	if err := os.Remove(certificatePathWithExtension(dirs.SnapdPKIV1Dir, name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// WriteCertificate writes the given contents as a new certificate file. Does not
+// set the state of the certificate (i.e. does not create symlinks in the added/blocked directories).
+func WriteCertificate(name, content string) error {
+	certPath := certificatePathWithExtension(dirs.SnapdPKIV1Dir, name)
+	if err := os.WriteFile(certPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("cannot write custom certificate %q: %v", name, err)
+	}
+	return nil
+}
+
+// SetCertificateState sets the state of the certificate with the given name and digest.
+// The state can be either "accepted", "blocked" or "unset". This is done by creating a symlink
+// to the certificate file in the corresponding directory (added/blocked), or removing any existing
+// symlink if the state is set to "unset".
+func SetCertificateState(name, digest, state string) error {
+	customPath := certificatePathWithExtension("..", name)
+
+	switch state {
+	case CertificateStateAccepted:
+		addedDir := filepath.Join(dirs.SnapdPKIV1Dir, "added")
+		addedPath := certificatePathWithExtension(addedDir, digest)
+		if err := os.Symlink(customPath, addedPath); err != nil {
+			return err
+		}
+	case CertificateStateBlocked:
+		blockedDir := filepath.Join(dirs.SnapdPKIV1Dir, "blocked")
+		blockedPath := certificatePathWithExtension(blockedDir, digest)
+		if err := os.Symlink(customPath, blockedPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type CertificateInfo struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	State       string `json:"state"`
+}
+
+func certificateDigest(name, baseDir string) (string, error) {
+	certPath := certificatePathWithExtension(baseDir, name)
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read certificate %q: %v", name, err)
+	}
+
+	cdata, err := ParseCertificateData(certBytes)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse certificate %q: %v", name, err)
+	}
+	return cdata.Digest, nil
+}
+
+func certificateInfo(name, baseDir, addedDir, blockedDir string) (*CertificateInfo, error) {
+	digest, err := certificateDigest(name, baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	state := CertificateStateUnset
+	if osutil.IsSymlink(certificatePathWithExtension(blockedDir, digest)) {
+		state = CertificateStateBlocked
+	} else if osutil.IsSymlink(certificatePathWithExtension(addedDir, digest)) {
+		state = CertificateStateAccepted
+	}
+
+	return &CertificateInfo{
+		Name:        name,
+		Fingerprint: digest,
+		State:       state,
+	}, nil
+}
+
+// CustomCertificates returns the list of custom certificates with their name, fingerprint and state.
+func CustomCertificates() ([]*CertificateInfo, error) {
+	addedDir := filepath.Join(dirs.SnapdPKIV1Dir, "added")
+	blockedDir := filepath.Join(dirs.SnapdPKIV1Dir, "blocked")
+
+	// Read the contents of the custom certificates directory to get the list of all custom certificates, and their content and state.
+	files, err := os.ReadDir(dirs.SnapdPKIV1Dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var certsInfo []*CertificateInfo
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".crt") {
+			continue
+		}
+		name := trimCrtExtension(f.Name())
+		info, err := certificateInfo(name, dirs.SnapdPKIV1Dir, addedDir, blockedDir)
+		if err != nil {
+			// Let us be resilient to errors here, and just skip the certificate if we
+			// cannot read it or parse it, as we don't want one broken certificate to
+			// cause the whole API to be unavailable.
+			logger.Noticef("Failed to read custom certificate %q: %v", name, err)
+			continue
+		}
+		if info != nil {
+			certsInfo = append(certsInfo, info)
+		}
+	}
+	return certsInfo, nil
 }

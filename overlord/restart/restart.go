@@ -59,6 +59,27 @@ const (
 	RestartSystemPoweroffNow
 )
 
+func (r RestartType) String() string {
+	switch r {
+	case RestartDaemon:
+		return "restart-daemon"
+	case RestartSystem:
+		return "restart-system"
+	case RestartSystemNow:
+		return "restart-system-now"
+	case RestartSocket:
+		return "restart-socket"
+	case StopDaemon:
+		return "stop-daemon"
+	case RestartSystemHaltNow:
+		return "restart-system-halt-now"
+	case RestartSystemPoweroffNow:
+		return "restart-system-poweroff-now"
+	default:
+		return fmt.Sprintf("restart-type(%d)", r)
+	}
+}
+
 // RestartBoundaryDirection defines in which direction a task may have a restart
 // boundary set. A restart boundary is when the task must restart, before it's dependencies
 // can continue. A restart boundary may be either in the 'Do' direction, or the 'Undo' direction.
@@ -388,26 +409,27 @@ func notifyRebootRequiredClassic(rebootRequiredSnap string) error {
 	return nil
 }
 
-// Pending returns whether a restart was requested with Request and of which type.
-func Pending(st *state.State) (bool, RestartType) {
+// Pending returns the type of restart requested with Request or RestartUnset
+// if no restart is pending.
+func Pending(st *state.State) RestartType {
 	cached := st.Cached(restartManagerKey{})
 	if cached == nil {
-		return false, RestartUnset
+		return RestartUnset
 	}
 	rm := cached.(*RestartManager)
 	return rm.Pending()
 }
 
-// Pending returns whether a restart was requested with Request and of which type.
+// Pending returns the type of restart requested with Request or RestartUnset
+// if no restart is pending.
 // NOTE: the state does not need to be locked to fetch this information.
-func (rm *RestartManager) Pending() (bool, RestartType) {
+func (rm *RestartManager) Pending() RestartType {
 	if rm == nil {
 		// This check is here because some tests don't set a RestartManager.
 		// This should generally not occur in production.
-		return false, RestartUnset
+		return RestartUnset
 	}
-	restarting := RestartType(atomic.LoadInt32(&rm.restarting))
-	return restarting != RestartUnset, restarting
+	return RestartType(atomic.LoadInt32(&rm.restarting))
 }
 
 func MockPending(st *state.State, restarting RestartType) RestartType {

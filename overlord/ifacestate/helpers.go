@@ -289,6 +289,8 @@ func (m *InterfaceManager) regenerateAllSecurityProfiles(tm timings.Measurer, un
 			defaultSetupCtx := func(snapName string) interfaces.SetupContext {
 				return interfaces.SetupContext{
 					Reason: interfaces.SnapSetupReasonOther,
+					// not running in task context, nothing can be deferred
+					CanDelayEffects: false,
 				}
 			}
 			if errors := interfaces.SetupMany(m.repo, backend, appSets, precomputedConfinementOpts, defaultSetupCtx, tm); len(errors) > 0 {
@@ -350,6 +352,19 @@ var removeStaleConnections = func(st *state.State) error {
 		return err
 	}
 	var staleConns []string
+	brokenCache := make(map[string]bool)
+	isBrokenCached := func(snapName string) (bool, error) {
+		broken, ok := brokenCache[snapName]
+		if ok {
+			return broken, nil
+		}
+		broken, err := isBroken(st, snapName)
+		if err != nil {
+			return false, err
+		}
+		brokenCache[snapName] = broken
+		return broken, nil
+	}
 	for id := range conns {
 		connRef, err := interfaces.ParseConnRef(id)
 		if err != nil {
@@ -360,12 +375,26 @@ var removeStaleConnections = func(st *state.State) error {
 			if !errors.Is(err, state.ErrNoState) {
 				return err
 			}
+			broken, err := isBrokenCached(connRef.SlotRef.Snap)
+			if err != nil {
+				return err
+			}
+			if broken {
+				continue
+			}
 			staleConns = append(staleConns, id)
 			continue
 		}
 		if err := snapstate.Get(st, connRef.SlotRef.Snap, &snapst); err != nil {
 			if !errors.Is(err, state.ErrNoState) {
 				return err
+			}
+			broken, err := isBrokenCached(connRef.PlugRef.Snap)
+			if err != nil {
+				return err
+			}
+			if broken {
+				continue
 			}
 			staleConns = append(staleConns, id)
 			continue
@@ -616,7 +645,12 @@ func (m *InterfaceManager) setupSecurityByBackend(task *state.Task, appSets []*i
 
 func (m *InterfaceManager) setupSnapSecurity(task *state.Task, appSet *interfaces.SnapAppSet, opts interfaces.ConfinementOptions, tm timings.Measurer) error {
 	sctxs := map[string]interfaces.SetupContext{
-		appSet.InstanceName(): {Reason: interfaces.SnapSetupReasonOther},
+		appSet.InstanceName(): {
+			Reason: interfaces.SnapSetupReasonOther,
+			// this is called only in the contexts where all backend effects
+			// are expected to be immediate
+			CanDelayEffects: false,
+		},
 	}
 	return m.setupSecurityByBackend(task, []*interfaces.SnapAppSet{appSet}, []interfaces.ConfinementOptions{opts}, sctxs, tm)
 }

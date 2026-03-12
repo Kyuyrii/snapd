@@ -139,7 +139,7 @@ func (s *certsTestSuite) TestParseCertificateDataSimpleHappy(c *C) {
 
 	cert, err := certstate.ParseCertificateData(bytes)
 	c.Assert(err, IsNil)
-	c.Check(cert.Subject.CommonName, Equals, "Test Certificate Root CA")
+	c.Check(cert.Raw.Subject.CommonName, Equals, "Test Certificate Root CA")
 }
 
 func (s *certsTestSuite) TestParseCertificateDataSkipsNonCertificateBlocks(c *C) {
@@ -151,18 +151,16 @@ func (s *certsTestSuite) TestParseCertificateDataSkipsNonCertificateBlocks(c *C)
 
 	cert, err := certstate.ParseCertificateData(data)
 	c.Assert(err, IsNil)
-	c.Check(cert.Subject.CommonName, Equals, "Test Certificate Root CA")
+	c.Check(cert.Raw.Subject.CommonName, Equals, "Test Certificate Root CA")
 }
 
-func (s *certsTestSuite) TestParseCertificateChainDataDERInput(c *C) {
+func (s *certsTestSuite) TestParseCertificateDataDERInput(c *C) {
 	_, cert, err := makeTestCertPEM("Test Certificate Root CA")
 	c.Assert(err, IsNil)
 
-	parsed, chainDER, err := certstate.ParseCertificateChainData(cert.Raw)
+	parsed, err := certstate.ParseCertificateData(cert.Raw)
 	c.Assert(err, IsNil)
-	c.Check(parsed.Subject.CommonName, Equals, "Test Certificate Root CA")
-	c.Check(chainDER, HasLen, 1)
-	c.Check(chainDER[0], DeepEquals, cert.Raw)
+	c.Check(parsed.Raw.Subject.CommonName, Equals, "Test Certificate Root CA")
 }
 
 func (s *certsTestSuite) TestParseCertificateDataNoCertificateBlock(c *C) {
@@ -284,7 +282,11 @@ func (s *certsTestSuite) TestGenerateCACertificatesDeduplicatesAndBlocks(c *C) {
 	c.Assert(err, IsNil)
 
 	blockedDigest := digestForPEM(c, cert2)
-	err = certstate.GenerateCACertificates(base, extras, []string{blockedDigest}, outDir)
+	err = certstate.GenerateCACertificates(&certstate.Certificates{
+		SystemCertificates: base,
+		AddedCertificates:  extras,
+		BlockedDigests:     []string{blockedDigest},
+	}, outDir)
 	c.Assert(err, IsNil)
 
 	out, err := os.ReadFile(filepath.Join(outDir, "ca-certificates.crt"))
@@ -321,7 +323,10 @@ func (s *certsTestSuite) TestGenerateCACertificatesDoesNotDeduplicateDifferentCh
 	extras, err := certstate.ParseCertificates(extraDir)
 	c.Assert(err, IsNil)
 
-	err = certstate.GenerateCACertificates(base, extras, nil, outDir)
+	err = certstate.GenerateCACertificates(&certstate.Certificates{
+		SystemCertificates: base,
+		AddedCertificates:  extras,
+	}, outDir)
 	c.Assert(err, IsNil)
 
 	out, err := os.ReadFile(filepath.Join(outDir, "ca-certificates.crt"))
@@ -341,7 +346,7 @@ func (s *certsTestSuite) TestGenerateCertificateDatabaseBacksUpAndWritesMerged(c
 	bPEM, _, err := makeTestCertPEM("B")
 	c.Assert(err, IsNil)
 
-	baseCertsDir := filepath.Join(dirs.GlobalRootDir, "etc", "ssl", "certs")
+	baseCertsDir := dirs.SystemCertsDir
 	c.Assert(os.MkdirAll(baseCertsDir, 0o755), IsNil)
 	c.Assert(os.WriteFile(filepath.Join(baseCertsDir, "a.crt"), aPEM, 0o644), IsNil)
 	c.Assert(os.WriteFile(filepath.Join(baseCertsDir, "b.crt"), bPEM, 0o644), IsNil)
@@ -370,7 +375,7 @@ func (s *certsTestSuite) TestGenerateCertificateDatabaseBlocksBaseCertByDigest(c
 	bPEM, _, err := makeTestCertPEM("B")
 	c.Assert(err, IsNil)
 
-	baseCertsDir := filepath.Join(dirs.GlobalRootDir, "etc", "ssl", "certs")
+	baseCertsDir := dirs.SystemCertsDir
 	c.Assert(os.MkdirAll(baseCertsDir, 0o755), IsNil)
 	c.Assert(os.WriteFile(filepath.Join(baseCertsDir, "a.crt"), aPEM, 0o644), IsNil)
 	c.Assert(os.WriteFile(filepath.Join(baseCertsDir, "b.crt"), bPEM, 0o644), IsNil)
@@ -388,4 +393,121 @@ func (s *certsTestSuite) TestGenerateCertificateDatabaseBlocksBaseCertByDigest(c
 	c.Assert(err, IsNil)
 	c.Check(bytes.Contains(out, aPEM), Equals, false)
 	c.Check(bytes.Contains(out, bPEM), Equals, true)
+}
+
+func (s *certsTestSuite) TestCertificatePathAddsCrtExtension(c *C) {
+	path := certstate.CertificatePath("my-cert")
+	c.Check(path, Equals, filepath.Join(dirs.SnapdPKIV1Dir, "my-cert.crt"))
+}
+
+func (s *certsTestSuite) TestWriteCertificateAndRemoveCertificate(c *C) {
+	certPEM, _, err := makeTestCertPEM("write-remove")
+	c.Assert(err, IsNil)
+	c.Assert(os.MkdirAll(dirs.SnapdPKIV1Dir, 0o755), IsNil)
+
+	err = certstate.WriteCertificate("cert-write", string(certPEM))
+	c.Assert(err, IsNil)
+
+	certPath := filepath.Join(dirs.SnapdPKIV1Dir, "cert-write.crt")
+	c.Assert(certPath, testutil.FileEquals, string(certPEM))
+
+	err = certstate.RemoveCertificate("cert-write")
+	c.Assert(err, IsNil)
+
+	_, err = os.Stat(certPath)
+	c.Check(os.IsNotExist(err), Equals, true)
+
+	// Removing again should be idempotent.
+	err = certstate.RemoveCertificate("cert-write")
+	c.Assert(err, IsNil)
+}
+
+func (s *certsTestSuite) TestSetCertificateStateAndRemoveCertificateSymlinks(c *C) {
+	certPEM, _, err := makeTestCertPEM("state-links")
+	c.Assert(err, IsNil)
+	c.Assert(os.MkdirAll(dirs.SnapdPKIV1Dir, 0o755), IsNil)
+	c.Assert(os.MkdirAll(filepath.Join(dirs.SnapdPKIV1Dir, "added"), 0o755), IsNil)
+	c.Assert(os.MkdirAll(filepath.Join(dirs.SnapdPKIV1Dir, "blocked"), 0o755), IsNil)
+
+	err = certstate.WriteCertificate("cert-state", string(certPEM))
+	c.Assert(err, IsNil)
+
+	digest := digestForPEM(c, certPEM)
+
+	err = certstate.SetCertificateState("cert-state", digest, certstate.CertificateStateAccepted)
+	c.Assert(err, IsNil)
+	addedPath := filepath.Join(dirs.SnapdPKIV1Dir, "added", digest+".crt")
+	target, err := os.Readlink(addedPath)
+	c.Assert(err, IsNil)
+	c.Check(target, Equals, "../cert-state.crt")
+
+	err = certstate.RemoveCertificateSymlinks(digest)
+	c.Assert(err, IsNil)
+
+	_, err = os.Lstat(addedPath)
+	c.Check(os.IsNotExist(err), Equals, true)
+
+	// Idempotent removal.
+	err = certstate.RemoveCertificateSymlinks(digest)
+	c.Assert(err, IsNil)
+
+	err = certstate.SetCertificateState("cert-state", digest, certstate.CertificateStateBlocked)
+	c.Assert(err, IsNil)
+	blockedPath := filepath.Join(dirs.SnapdPKIV1Dir, "blocked", digest+".crt")
+	target, err = os.Readlink(blockedPath)
+	c.Assert(err, IsNil)
+	c.Check(target, Equals, "../cert-state.crt")
+}
+
+func (s *certsTestSuite) TestCustomCertificatesReturnsInfoAndSkipsBroken(c *C) {
+	certAccepted, _, err := makeTestCertPEM("accepted")
+	c.Assert(err, IsNil)
+	certBlocked, _, err := makeTestCertPEM("blocked")
+	c.Assert(err, IsNil)
+	c.Assert(os.MkdirAll(dirs.SnapdPKIV1Dir, 0o755), IsNil)
+	c.Assert(os.MkdirAll(filepath.Join(dirs.SnapdPKIV1Dir, "added"), 0o755), IsNil)
+	c.Assert(os.MkdirAll(filepath.Join(dirs.SnapdPKIV1Dir, "blocked"), 0o755), IsNil)
+
+	err = certstate.WriteCertificate("cert-accepted", string(certAccepted))
+	c.Assert(err, IsNil)
+	err = certstate.WriteCertificate("cert-blocked", string(certBlocked))
+	c.Assert(err, IsNil)
+
+	acceptedDigest := digestForPEM(c, certAccepted)
+	blockedDigest := digestForPEM(c, certBlocked)
+
+	err = certstate.SetCertificateState("cert-accepted", acceptedDigest, certstate.CertificateStateAccepted)
+	c.Assert(err, IsNil)
+	err = certstate.SetCertificateState("cert-blocked", blockedDigest, certstate.CertificateStateBlocked)
+	c.Assert(err, IsNil)
+
+	// Broken cert should be ignored by CustomCertificates and not fail the call.
+	c.Assert(os.WriteFile(filepath.Join(dirs.SnapdPKIV1Dir, "broken.crt"), []byte("not-a-certificate"), 0o644), IsNil)
+
+	infos, err := certstate.CustomCertificates()
+	c.Assert(err, IsNil)
+
+	byName := make(map[string]*certstate.CertificateInfo)
+	for _, info := range infos {
+		byName[info.Name] = info
+	}
+
+	c.Assert(byName["cert-accepted"], NotNil)
+	c.Check(byName["cert-accepted"].Fingerprint, Equals, acceptedDigest)
+	c.Check(byName["cert-accepted"].State, Equals, certstate.CertificateStateAccepted)
+
+	c.Assert(byName["cert-blocked"], NotNil)
+	c.Check(byName["cert-blocked"].Fingerprint, Equals, blockedDigest)
+	c.Check(byName["cert-blocked"].State, Equals, certstate.CertificateStateBlocked)
+
+	_, exists := byName["broken"]
+	c.Check(exists, Equals, false)
+}
+
+func (s *certsTestSuite) TestCustomCertificatesMissingDirReturnsNil(c *C) {
+	c.Assert(os.RemoveAll(dirs.SnapdPKIV1Dir), IsNil)
+
+	infos, err := certstate.CustomCertificates()
+	c.Assert(err, IsNil)
+	c.Check(infos, IsNil)
 }

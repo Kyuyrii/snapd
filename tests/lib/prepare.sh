@@ -735,7 +735,13 @@ EOF
 #!/bin/sh
 set -ex
 # ensure we don't enable ssh in install mode or spread will get confused
-if ! grep -E 'snapd_recovery_mode=(run|recover)' /proc/cmdline; then
+# We look at modeenv as that is authoritative if installing from the initramfs.
+if [ -f /var/lib/snapd/modeenv ]; then
+    if ! grep -E '^mode=(run|recover)$' /var/lib/snapd/modeenv; then
+        echo "not in run or recovery mode - script not running"
+        exit 0
+    fi
+elif ! grep -E 'snapd_recovery_mode=(run|recover)' /proc/cmdline; then
     echo "not in run or recovery mode - script not running"
     exit 0
 fi
@@ -1145,7 +1151,7 @@ description: kernel component for testing purposes
 EOF
     # Replace _ or - with [_-], as it can be any of these
     glob_mod_name=$(printf '%s' "$mod_name" | sed -r 's/[-_]/[-_]/g')
-    module_path=$(find pc-kernel -name "${glob_mod_name}.ko*")
+    module_path=$(find pc-kernel/modules/ -name "${glob_mod_name}.ko*")
     cp "$module_path" "$comp_ko_dir"
     snap pack --filename=pc-kernel+"$comp_name".comp "$comp_name"
 
@@ -1552,7 +1558,15 @@ EOF
 
         # also add debug command line parameters to the kernel command line via
         # the gadget in case things go side ways and we need to debug
-        snap download --basename=pc --channel="${BRANCH}/${GADGET_CHANNEL}" pc
+        case "${BRANCH}/${GADGET_CHANNEL}" in
+            26/beta)
+                # TODO_UC26RELEASE: when core26 is release we can drop edge
+                snap download --basename=pc --channel="26/edge" pc
+                ;;
+            *)
+                snap download --basename=pc --channel="${BRANCH}/${GADGET_CHANNEL}" pc
+                ;;
+        esac
         test -e pc.snap
         unsquashfs -d pc-gadget pc.snap
         # TODO: it would be desirable when we need to do in-depth debugging of
@@ -1647,12 +1661,19 @@ EOF
             # We setup the ntp server in case it is defined in the current env
             # This is not needed in classic systems because the images already have ntp configured
             if [ -n "${NTP_SERVER:-}" ]; then
-                TARGET_TIME_CONF="$(find "${BASE}-snap" -name timesyncd.conf)"
-                if [ -z "$TARGET_TIME_CONF" ]; then
-                    echo "File timesyncd.conf not found in core image"
-                    exit 1
+                if [ -e /etc/systemd/timesyncd.conf ]; then
+                    TARGET_TIME_CONF="$(find "${BASE}-snap" -name timesyncd.conf)"
+                    if [ -z "$TARGET_TIME_CONF" ]; then
+                        echo "File timesyncd.conf not found in core image"
+                        exit 1
+                    fi
+                    cp /etc/systemd/timesyncd.conf "$TARGET_TIME_CONF"
                 fi
-                cp /etc/systemd/timesyncd.conf "$TARGET_TIME_CONF"
+                if [ -e "${BASE}-snap/usr/lib/tmpfiles.d/core-writable.conf" ]; then
+                    echo "C /etc/chrony/sources.d/ci-proxy.sources" >>"${BASE}-snap/usr/lib/tmpfiles.d/core-writable.conf"
+                    mkdir -p "${BASE}-snap/usr/share/factory/writable/system-data/etc/chrony/sources.d"
+                    echo "pool ${NTP_SERVER} iburst maxsources 1 nts prefer" "${BASE}-snap/usr/share/factory/writable/system-data/etc/chrony/sources.d/ci-proxy.sources"
+                fi
             fi
 
             snap pack --filename="${BASE}-repacked.snap" "${BASE}-snap"
@@ -2009,7 +2030,17 @@ cache_snaps(){
     # Download each of the snaps we want to pre-cache. Note that `snap download`
     # a quick no-op if the file is complete.
     for snap_name in "$@"; do
-        snap download "$snap_name"
+        case "$snap_name" in
+            # TODO_UC26RELEASE: Cannot have a non devel snaps for
+            # core26 base yet, which means cannot be promoted. Which
+            # means it has to be edge.
+            test-snapd-sh-core26)
+                snap download --edge "$snap_name"
+                ;;
+            *)
+                snap download "$snap_name"
+                ;;
+        esac
 
         # Copy all of the snaps back to the spool directory. From there we
         # will reuse them during subsequent `snap install` operations.
