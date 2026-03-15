@@ -72,8 +72,7 @@ userns,
 /usr/lib/pressure-vessel/from-host/libexec/steam-runtime-tools-*/* ixr,
 
 # Allow access to pressure-vessel directories
-/run/pressure-vessel/** mrw,
-/var/pressure-vessel/** mrw,
+/*/pressure-vessel/** mrw,
 
 # Access to mounting points
 /media/ r,
