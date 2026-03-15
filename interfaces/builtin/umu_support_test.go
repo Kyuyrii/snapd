@@ -110,8 +110,7 @@ func (s *UMUSupportInterfaceSuite) TestAppArmorSpec(c *C) {
 	c.Check(snippet, testutil.Contains, "/usr/bin/steam-runtime-launcher-interface-* ixr,")
 	c.Check(snippet, testutil.Contains, "/usr/lib/pressure-vessel/from-host/libexec/steam-runtime-tools-*/* ixr,")
 
-	c.Check(snippet, testutil.Contains, "/run/pressure-vessel/** mrw,")
-	c.Check(snippet, testutil.Contains, "/var/pressure-vessel/** mrw,")
+	c.Check(snippet, testutil.Contains, "/*/pressure-vessel/** mrw,")
 
 	c.Check(snippet, testutil.Contains, "/media/ r,")
 	c.Check(snippet, testutil.Contains, "/mnt/ r,")
