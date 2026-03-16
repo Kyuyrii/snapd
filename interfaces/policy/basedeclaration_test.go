@@ -1437,6 +1437,7 @@ func (s *baseDeclSuite) TestValidity(c *C) {
 		"firmware-updater-support":         true,
 		"devlxd":                           true,
 		"mediatek-accel":                   true,
+		"umu-support":                      true,
 	}
 
 	for _, iface := range all {
